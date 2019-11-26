@@ -67,6 +67,10 @@
     <PostBuildEvent>
       <Message>Copy DLLs</Message>
     </PostBuildEvent>
+    <PreLinkEvent>
+      <Command>copy $(SolutionDir)example.bat $(OutDir)</Command>
+      <Message>Copy batch scripts</Message>
+    </PreLinkEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
     <ClCompile>
@@ -94,6 +98,12 @@
     <PostBuildEvent>
       <Message>Copy DLLs</Message>
     </PostBuildEvent>
+    <PreLinkEvent>
+      <Command>copy $(SolutionDir)example.bat $(OutDir)</Command>
+    </PreLinkEvent>
+    <PreLinkEvent>
+      <Message>Copy batch scripts</Message>
+    </PreLinkEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="targetver.h" />
