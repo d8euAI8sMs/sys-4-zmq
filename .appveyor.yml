@@ -4,7 +4,8 @@ image:
   - Visual Studio 2013
   
 environment:
-  project_name: zmq
+  sln_name: zmq
+  project_name: zmq-source
 
 configuration:
   - Release
@@ -13,8 +14,8 @@ install:
   - git submodule update --init --recursive
 
 build:
-  project: src\%project_name%\%project_name%.sln
+  project: src\%sln_name%\%sln_name%.sln
 
 artifacts:
-  - path: 'src\%project_name%\%CONFIGURATION%\%project_name%.exe'
-  - path: 'src\%project_name%\%CONFIGURATION%\*.dll'
+  - path: 'src\%sln_name%\%CONFIGURATION%\%project_name%.exe'
+  - path: 'src\%sln_name%\%CONFIGURATION%\*.dll'
