@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cctype>
 #include <zmq.h>
+#include <opencv/cv.hpp>
 
 /* ***************************************************** */
 
@@ -19,6 +20,8 @@ struct config_t
     std::string dst_port;
     std::string profile;
     std::string realtime;
+    std::string filter;
+    std::string cam_url;
 };
 
 using args_t = std::unordered_map < std::string, std::string > ;
@@ -72,27 +75,61 @@ config_t make_config(const args_t & args)
         or_default(args, "dst-port", "5557"),
         or_default(args, "", "worker"),
         or_default(args, "realtime", "false"),
+        or_default(args, "filter", "false"),
+        or_default(args, "cam_url", ".\\sample.mov"),
     };
+}
+
+void frame_encode(uint32_t seq, const std::vector < uint8_t > & buf, zmq_msg_t & msg)
+{
+    zmq_msg_init_size(&msg, sizeof(seq) + buf.size());
+    *(uint32_t*)zmq_msg_data(&msg) = seq;
+    memcpy_s((uint8_t*)zmq_msg_data(&msg) + sizeof(seq),
+                buf.size(), buf.data(), buf.size());
+}
+
+void frame_decode(zmq_msg_t & msg, uint32_t & seq, std::vector < uint8_t > & buf)
+{
+    seq = *(uint32_t *)zmq_msg_data(&msg);
+    buf.resize(zmq_msg_size(&msg) - sizeof(seq));
+    memcpy_s(buf.data(), buf.size(),
+             (uint8_t *)zmq_msg_data(&msg) + sizeof(seq), buf.size());
 }
 
 /* ***************************************************** */
 
 int source(const config_t & cfg)
 {
+    cv::VideoCapture cap(cfg.cam_url);
+    cv::Mat frame;
+    std::vector < uint8_t > buf;
+
     void * context = zmq_ctx_new();
     void * worker_pool = zmq_socket(context, ZMQ_PUSH);
 
     auto addr = "tcp://*:" + cfg.src_port;
     zmq_bind(worker_pool, addr.c_str());
 
-    const int n_req = 100;
-    const int sleep_ms = 500;
-    for (int i = 0; i != n_req; ++i)
+    uint32_t seq = 0;
+    while (cap.read(frame))
     {
-        std::string buf = "hello - " + std::to_string(i + 1);
-        printf("sending '%s'...\n", buf.c_str());
-        zmq_send(worker_pool, buf.c_str(), buf.size(), 0);
-        Sleep(sleep_ms);
+        // show frame
+        cv::imshow("SOURCE", frame);
+        cv::waitKey(1000 / 25); // ~25 fps
+
+        printf("  captured '%d' frame\n", seq + 1);
+
+        // encode frame
+        cv::imencode(".jpg", frame, buf);
+
+        // prepare message
+        zmq_msg_t msg; frame_encode(seq, buf, msg);
+
+        zmq_msg_send(&msg, worker_pool, 0);
+
+        zmq_msg_close(&msg);
+
+        ++seq;
     }
 
     zmq_close (worker_pool);
@@ -114,39 +151,50 @@ int worker_stub(const config_t & cfg)
     auto dst_addr = "tcp://" + cfg.dst_host + ":" + cfg.dst_port;
     zmq_connect(sink, dst_addr.c_str());
 
-    const int sleep_ms_min = 500;
-    const int sleep_ms_std = 1000;
+    std::vector < uint8_t > buf;
+    cv::Mat frame;
+    uint32_t seq;
+
     while (true)
     {
-        std::string buf(100, '\0');
-        zmq_recv(source, (void*)buf.data(), buf.size(), 0);
-        buf.resize(strlen(buf.c_str())); // compact buffer
+        zmq_msg_t msg;
+        zmq_msg_init(&msg);
+
+        zmq_msg_recv(&msg, source, 0);
 
         // drop all outstanding messages to always operate
         // on relatively fresh data (slow worker workaround)
         //
         // [don't put this before blocking recv - it may
         //  cause unwanted effect of the newest messages
-        //  being dropped; however, it may obviously decrease
-        //  latency as only the newest messages are processed
-        //  and no time is wasted on processing stale data]
+        //  being dropped; this implementation automatically
+        //  purges the queue and stores the latest message
+        //  in the buffer]
         while (cfg.realtime != "false")
         {
-            int res = zmq_recv(source, (void*)buf.data(), buf.size(), ZMQ_DONTWAIT);
+            zmq_msg_t msg0;
+            zmq_msg_init(&msg0);
+            int res = zmq_msg_recv(&msg0, source, ZMQ_DONTWAIT);
             if ((res == -1) && (errno == EAGAIN)) break;
             printf("  *  dropping message  *\n");
+            zmq_msg_close(&msg);
+            msg = msg0;
         }
 
-        printf("received '%s'\n", buf.c_str());
+        frame_decode(msg, seq, buf);
 
-        printf("  doing costly operation on string\n");
-        Sleep(sleep_ms_min + (rand() % sleep_ms_std));
-        std::transform(buf.begin(), buf.end(), buf.begin(),
-                       [](unsigned char c){ return std::toupper(c); });
-        printf("  end doing costly operation\n");
+        printf("  received '%d' frame\n", seq + 1);
 
-        printf("  sending '%s'\n", buf.c_str());
-        zmq_send(sink, (void*)buf.data(), buf.size(), 0);
+        // decode, blur and send image to the sink
+        cv::imdecode(buf, cv::IMREAD_COLOR, &frame);
+        cv::GaussianBlur(frame, frame, { 51, 51 }, 0);
+        cv::imencode(".jpg", frame, buf);
+
+        frame_encode(seq, buf, msg);
+        
+        zmq_msg_send(&msg, sink, 0);
+
+        zmq_msg_close(&msg);
     }
     return 0;
 }
@@ -161,13 +209,34 @@ int sink_stub(const config_t & cfg)
     auto dst_addr = "tcp://*:" + cfg.dst_port;
     zmq_bind(sink, dst_addr.c_str());
 
+    std::vector < uint8_t > buf;
+    cv::Mat frame;
+    uint32_t seq, last_seq = 0;
+
     while (true)
     {
-        std::string buf(100, '\0');
-        zmq_recv(sink, (void*)buf.data(), buf.size(), 0);
-        buf.resize(strlen(buf.c_str())); // compact buffer
+        zmq_msg_t msg;
+        zmq_msg_init(&msg);
 
-        printf("received '%s'\n", buf.c_str());
+        zmq_msg_recv(&msg, sink, 0);
+
+        frame_decode(msg, seq, buf);
+
+        printf("received '%d' frame\n", seq);
+
+        // filter out outdated frames
+        if ((cfg.filter != "false") && (seq < last_seq)) continue;
+
+        // decode frame
+        cv::imdecode(buf, cv::IMREAD_COLOR, &frame);
+
+        // show frame
+        cv::imshow("SOURCE", frame);
+        cv::waitKey(1000 / 25); // ~25 fps
+
+        zmq_msg_close(&msg);
+
+        last_seq = seq;
     }
     return 0;
 }
