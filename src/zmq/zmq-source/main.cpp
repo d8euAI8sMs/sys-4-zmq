@@ -18,6 +18,7 @@ struct config_t
     std::string dst_host;
     std::string dst_port;
     std::string profile;
+    std::string realtime;
 };
 
 using args_t = std::unordered_map < std::string, std::string > ;
@@ -70,6 +71,7 @@ config_t make_config(const args_t & args)
         or_default(args, "dst-host", "localhost"),
         or_default(args, "dst-port", "5557"),
         or_default(args, "", "worker"),
+        or_default(args, "realtime", "false"),
     };
 }
 
@@ -119,6 +121,21 @@ int worker_stub(const config_t & cfg)
         std::string buf(100, '\0');
         zmq_recv(source, (void*)buf.data(), buf.size(), 0);
         buf.resize(strlen(buf.c_str())); // compact buffer
+
+        // drop all outstanding messages to always operate
+        // on relatively fresh data (slow worker workaround)
+        //
+        // [don't put this before blocking recv - it may
+        //  cause unwanted effect of the newest messages
+        //  being dropped; however, it may obviously decrease
+        //  latency as only the newest messages are processed
+        //  and no time is wasted on processing stale data]
+        while (cfg.realtime != "false")
+        {
+            int res = zmq_recv(source, (void*)buf.data(), buf.size(), ZMQ_DONTWAIT);
+            if ((res == -1) && (errno == EAGAIN)) break;
+            printf("  *  dropping message  *\n");
+        }
 
         printf("received '%s'\n", buf.c_str());
 
