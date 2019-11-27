@@ -4,11 +4,16 @@
 #include <tchar.h>
 
 #include <string>
+#include <array>
 #include <unordered_map>
 #include <algorithm>
 #include <cctype>
 #include <zmq.h>
 #include <opencv/cv.hpp>
+
+#ifndef PACKET_VER
+#define PACKET_VER 2
+#endif
 
 /* ***************************************************** */
 
@@ -80,20 +85,84 @@ config_t make_config(const args_t & args)
     };
 }
 
-void frame_encode(uint32_t seq, const std::vector < uint8_t > & buf, zmq_msg_t & msg)
+/* ***************************************************** */
+
+struct packet_t
 {
-    zmq_msg_init_size(&msg, sizeof(seq) + buf.size());
-    *(uint32_t*)zmq_msg_data(&msg) = seq;
-    memcpy_s((uint8_t*)zmq_msg_data(&msg) + sizeof(seq),
-                buf.size(), buf.data(), buf.size());
+    uint32_t ver;
+    uint32_t seq;
+    std::vector < std::vector < uint8_t > > frms;
+};
+
+packet_t make_packet()
+{
+    return { PACKET_VER, 0 };
 }
 
-void frame_decode(zmq_msg_t & msg, uint32_t & seq, std::vector < uint8_t > & buf)
+packet_t make_packet(uint32_t n)
 {
-    seq = *(uint32_t *)zmq_msg_data(&msg);
-    buf.resize(zmq_msg_size(&msg) - sizeof(seq));
-    memcpy_s(buf.data(), buf.size(),
-             (uint8_t *)zmq_msg_data(&msg) + sizeof(seq), buf.size());
+    packet_t p = make_packet();
+    p.frms.resize(n);
+    return p;
+}
+
+bool validate_packet(const packet_t & p)
+{
+    return p.ver == PACKET_VER;
+}
+
+void frame_encode(const packet_t & p, zmq_msg_t & msg)
+{
+    uint32_t len;
+    auto size = sizeof(p.ver) + sizeof(p.seq) + sizeof(len);
+    for (size_t i = 0; i < p.frms.size(); ++i)
+    {
+        size += p.frms[i].size() + sizeof(len);
+    }
+
+    zmq_msg_init_size(&msg, size);
+
+    auto data = (uint8_t*)zmq_msg_data(&msg);
+    *(decltype(p.ver)*)(data + offsetof(packet_t, ver)) = p.ver;
+    *(decltype(p.seq)*)(data + offsetof(packet_t, seq)) = p.seq;
+
+    data += offsetof(packet_t, frms);
+
+    for (size_t i = 0; i < p.frms.size(); ++i)
+    {
+        len = p.frms[i].size();
+        *(decltype(len)*)(data) = len;
+
+        memcpy_s(data + sizeof(len), len, p.frms[i].data(), len);
+        data += len + sizeof(len);
+    }
+
+    *(decltype(len)*)(data) = 0;
+}
+
+bool frame_decode(zmq_msg_t & msg, packet_t & p)
+{
+    uint32_t len;
+
+    auto data = (uint8_t*)zmq_msg_data(&msg);
+    p.ver = *(decltype(p.ver)*)(data + offsetof(packet_t, ver));
+    p.seq = *(decltype(p.seq)*)(data + offsetof(packet_t, seq));
+
+    data += offsetof(packet_t, frms);
+
+    p.frms.clear();
+
+    while (true)
+    {
+        len = *(decltype(len)*)(data);
+        if (len == 0) break;
+
+        p.frms.emplace_back(len);
+        memcpy_s(p.frms.back().data(), len, data + sizeof(len), len);
+        data += len + sizeof(len);
+    }
+
+    return validate_packet(p);
 }
 
 /* ***************************************************** */
@@ -102,7 +171,7 @@ int source(const config_t & cfg)
 {
     cv::VideoCapture cap(cfg.cam_url);
     cv::Mat frame;
-    std::vector < uint8_t > buf;
+    packet_t packet = make_packet(1);
 
     void * context = zmq_ctx_new();
     void * worker_pool = zmq_socket(context, ZMQ_PUSH);
@@ -110,26 +179,25 @@ int source(const config_t & cfg)
     auto addr = "tcp://*:" + cfg.src_port;
     zmq_bind(worker_pool, addr.c_str());
 
-    uint32_t seq = 0;
     while (cap.read(frame))
     {
         // show frame
         cv::imshow("SOURCE", frame);
         cv::waitKey(1000 / 25); // ~25 fps
 
-        printf("  captured '%d' frame\n", seq + 1);
+        printf("  captured '%d' frame\n", packet.seq + 1);
 
         // encode frame
-        cv::imencode(".jpg", frame, buf);
+        cv::imencode(".jpg", frame, packet.frms[0]);
 
         // prepare message
-        zmq_msg_t msg; frame_encode(seq, buf, msg);
+        zmq_msg_t msg; frame_encode(packet, msg);
 
         zmq_msg_send(&msg, worker_pool, 0);
 
         zmq_msg_close(&msg);
 
-        ++seq;
+        ++packet.seq;
     }
 
     zmq_close (worker_pool);
@@ -153,9 +221,9 @@ int worker_stub(const config_t & cfg)
     auto dst_addr = "tcp://" + cfg.dst_host + ":" + cfg.dst_port;
     zmq_connect(sink, dst_addr.c_str());
 
-    std::vector < uint8_t > buf;
     cv::Mat frame;
-    uint32_t seq;
+    packet_t in_packet;
+    packet_t out_packet = make_packet(2);
 
     while (true)
     {
@@ -183,18 +251,26 @@ int worker_stub(const config_t & cfg)
             msg = msg0;
         }
 
-        frame_decode(msg, seq, buf);
+        if (frame_decode(msg, in_packet))
+        {
+            printf("  received '%d' frame\n", in_packet.seq + 1);
 
-        printf("  received '%d' frame\n", seq + 1);
+            // decode, blur and send image to the sink
+            cv::imdecode(in_packet.frms[0], cv::IMREAD_COLOR, &frame);
+            process_image(frame);
+            cv::imencode(".jpg", frame, out_packet.frms[1]);
 
-        // decode, blur and send image to the sink
-        cv::imdecode(buf, cv::IMREAD_COLOR, &frame);
-        process_image(frame);
-        cv::imencode(".jpg", frame, buf);
+            out_packet.seq = in_packet.seq;
+            out_packet.frms[0] = std::move(in_packet.frms[0]);
 
-        frame_encode(seq, buf, msg);
+            frame_encode(out_packet, msg);
         
-        zmq_msg_send(&msg, sink, 0);
+            zmq_msg_send(&msg, sink, 0);
+        }
+        else
+        {
+            printf("  invalid packet received\n");
+        }
 
         zmq_msg_close(&msg);
     }
@@ -217,9 +293,9 @@ int sink_stub(const config_t & cfg)
     auto dst_addr = "tcp://*:" + cfg.dst_port;
     zmq_bind(sink, dst_addr.c_str());
 
-    std::vector < uint8_t > buf;
-    cv::Mat frame;
-    uint32_t seq, last_seq = 0;
+    cv::Mat frame, orig, stack;
+    uint32_t last_seq = 0;
+    packet_t packet;
 
     while (true)
     {
@@ -228,23 +304,34 @@ int sink_stub(const config_t & cfg)
 
         zmq_msg_recv(&msg, sink, 0);
 
-        frame_decode(msg, seq, buf);
+        if (frame_decode(msg, packet))
+        {
+            printf("received '%d' frame\n", packet.seq);
 
-        printf("received '%d' frame\n", seq);
+            // filter out outdated frames
+            if ((cfg.filter != "false") && (packet.seq < last_seq)) continue;
 
-        // filter out outdated frames
-        if ((cfg.filter != "false") && (seq < last_seq)) continue;
+            // decode frames
+            cv::imdecode(packet.frms[0], cv::IMREAD_COLOR, &orig);
+            cv::imdecode(packet.frms[1], cv::IMREAD_COLOR, &frame);
 
-        // decode frame
-        cv::imdecode(buf, cv::IMREAD_COLOR, &frame);
+            // stack original and processed frames
+            cv::vconcat(orig, frame, stack);
+            double c = 1.5 * 480.0 / stack.rows;
+            cv::resize(stack, stack, {}, c, c);
 
-        // show frame
-        cv::imshow("SOURCE", frame);
-        cv::waitKey(1000 / 25); // ~25 fps
+            // show frame
+            cv::imshow("SINK", stack);
+            cv::waitKey(1000 / 25); // ~25 fps
+        }
+        else
+        {
+            printf("invalid packet received\n");
+        }
 
         zmq_msg_close(&msg);
 
-        last_seq = seq;
+        last_seq = packet.seq;
     }
     return 0;
 }
