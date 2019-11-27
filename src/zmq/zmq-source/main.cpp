@@ -139,6 +139,8 @@ int source(const config_t & cfg)
 
 /* ***************************************************** */
 
+void process_image(cv::Mat & in_out);
+
 int worker_stub(const config_t & cfg)
 {
     void *context = zmq_ctx_new();
@@ -187,7 +189,7 @@ int worker_stub(const config_t & cfg)
 
         // decode, blur and send image to the sink
         cv::imdecode(buf, cv::IMREAD_COLOR, &frame);
-        cv::GaussianBlur(frame, frame, { 51, 51 }, 0);
+        process_image(frame);
         cv::imencode(".jpg", frame, buf);
 
         frame_encode(seq, buf, msg);
@@ -197,6 +199,12 @@ int worker_stub(const config_t & cfg)
         zmq_msg_close(&msg);
     }
     return 0;
+}
+
+// stub image processing
+void process_image(cv::Mat & in_out)
+{
+    cv::GaussianBlur(in_out, in_out, { 51, 51 }, 0);
 }
 
 /* ***************************************************** */
