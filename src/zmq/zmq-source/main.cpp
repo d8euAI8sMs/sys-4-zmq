@@ -277,10 +277,86 @@ int worker_stub(const config_t & cfg)
     return 0;
 }
 
-// stub image processing
-void process_image(cv::Mat & in_out)
+//finding boundaries
+int border_image(cv::Mat& frame_open_CV, cv::Mat& detected_edges)
 {
-    cv::GaussianBlur(in_out, in_out, { 51, 51 }, 0);
+	int lowThreshold = 200;
+	int ratio = 10;
+	int kernel_size = 5;
+	cv::Mat frame_open_CV_gray, dst;
+	dst.create(frame_open_CV.size(), frame_open_CV.type());
+	cv::cvtColor(frame_open_CV, frame_open_CV_gray, cv::COLOR_BGR2GRAY);
+	cv::blur(frame_open_CV_gray, detected_edges, cv::Size(kernel_size, kernel_size));
+	cv::Canny(detected_edges, detected_edges, lowThreshold, lowThreshold * ratio, kernel_size);
+	dst = cv::Scalar::all(0);
+	frame_open_CV.copyTo(dst, detected_edges);
+	frame_open_CV_gray.release();
+	dst.release();
+	return 0;
+}
+
+//reduction and merge
+int reduction_plus_merge_image(cv::Mat& frame_open_CV, cv::Mat& detected_edges, cv::Mat& reduction_matrix)
+{
+	cv::Mat channels_frame_open_CV[3], channels_detected_edges[3];
+	int frame_CV_width = frame_open_CV.size().width;
+	int frame_CV_height = frame_open_CV.size().height;
+	cv::split(frame_open_CV, channels_frame_open_CV);
+	cv::split(detected_edges, channels_detected_edges);
+	int max_z = 256;
+	int step_z = 64;
+	for (int i = 0; i < frame_CV_height; i++)
+	{
+		for (int j = 0; j < frame_CV_width; j++)
+		{
+			for (uchar z = 0; z < max_z - step_z; z += step_z)
+			{
+				if (channels_frame_open_CV[0].data[i * frame_CV_width + j] > z&&
+					channels_frame_open_CV[0].data[i * frame_CV_width + j] < z + step_z)
+				{
+					channels_frame_open_CV[0].data[i * frame_CV_width + j] = z + step_z / 2;
+				}
+				if (channels_frame_open_CV[1].data[i * frame_CV_width + j] > z&&
+					channels_frame_open_CV[1].data[i * frame_CV_width + j] < z + step_z)
+				{
+					channels_frame_open_CV[1].data[i * frame_CV_width + j] = z + step_z / 2;
+				}
+				if (channels_frame_open_CV[2].data[i * frame_CV_width + j] > z&&
+					channels_frame_open_CV[2].data[i * frame_CV_width + j] < z + step_z)
+				{
+					channels_frame_open_CV[2].data[i * frame_CV_width + j] = z + step_z / 2;
+				}
+				if (channels_detected_edges[0].data[i * frame_CV_width + j] == 255)
+				{
+
+					channels_frame_open_CV[0].data[i * frame_CV_width + j] = 0;
+					channels_frame_open_CV[1].data[i * frame_CV_width + j] = 0;
+					channels_frame_open_CV[2].data[i * frame_CV_width + j] = 255;
+				}
+			}
+		}
+	}
+	cv::merge(channels_frame_open_CV, 3, reduction_matrix);
+	channels_frame_open_CV->release();
+	channels_detected_edges->release();
+	return 0;
+}
+
+//image processing
+int process_image(cv::Mat& in_out)
+{
+	cv::Mat frame_open_CV,
+		detected_edges,
+		reduction_matrix;
+	in_out.copyTo(frame_open_CV);
+	border_image(frame_open_CV, detected_edges);
+	reduction_plus_merge_image(frame_open_CV, detected_edges, reduction_matrix);
+	reduction_matrix.copyTo(in_out);
+	in_out = cv::Mat();
+	frame_open_CV.release();
+	detected_edges.release();
+	reduction_matrix.release();
+	return 0;
 }
 
 /* ***************************************************** */
