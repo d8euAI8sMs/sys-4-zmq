@@ -343,7 +343,7 @@ int reduction_plus_merge_image(cv::Mat& frame_open_CV, cv::Mat& detected_edges, 
 }
 
 //image processing
-int process_image(cv::Mat& in_out)
+void process_image(cv::Mat& in_out)
 {
 	cv::Mat frame_open_CV,
 		detected_edges,
@@ -356,7 +356,6 @@ int process_image(cv::Mat& in_out)
 	frame_open_CV.release();
 	detected_edges.release();
 	reduction_matrix.release();
-	return 0;
 }
 
 /* ***************************************************** */
