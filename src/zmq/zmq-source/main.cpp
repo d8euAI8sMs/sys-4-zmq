@@ -290,8 +290,6 @@ int border_image(cv::Mat& frame_open_CV, cv::Mat& detected_edges)
 	cv::Canny(detected_edges, detected_edges, lowThreshold, lowThreshold * ratio, kernel_size);
 	dst = cv::Scalar::all(0);
 	frame_open_CV.copyTo(dst, detected_edges);
-	frame_open_CV_gray.release();
-	dst.release();
 	return 0;
 }
 
@@ -311,20 +309,13 @@ int reduction_plus_merge_image(cv::Mat& frame_open_CV, cv::Mat& detected_edges, 
 		{
 			for (uchar z = 0; z < max_z - step_z; z += step_z)
 			{
-				if (channels_frame_open_CV[0].data[i * frame_CV_width + j] > z&&
-					channels_frame_open_CV[0].data[i * frame_CV_width + j] < z + step_z)
+				for (int t = 0; t < 3; t++)
 				{
-					channels_frame_open_CV[0].data[i * frame_CV_width + j] = z + step_z / 2;
-				}
-				if (channels_frame_open_CV[1].data[i * frame_CV_width + j] > z&&
-					channels_frame_open_CV[1].data[i * frame_CV_width + j] < z + step_z)
-				{
-					channels_frame_open_CV[1].data[i * frame_CV_width + j] = z + step_z / 2;
-				}
-				if (channels_frame_open_CV[2].data[i * frame_CV_width + j] > z&&
-					channels_frame_open_CV[2].data[i * frame_CV_width + j] < z + step_z)
-				{
-					channels_frame_open_CV[2].data[i * frame_CV_width + j] = z + step_z / 2;
+					if (channels_frame_open_CV[t].data[i * frame_CV_width + j] > z&&
+						channels_frame_open_CV[t].data[i * frame_CV_width + j] < z + step_z)
+					{
+						channels_frame_open_CV[t].data[i * frame_CV_width + j] = z + step_z / 2;
+					}
 				}
 				if (channels_detected_edges[0].data[i * frame_CV_width + j] == 255)
 				{
@@ -337,25 +328,17 @@ int reduction_plus_merge_image(cv::Mat& frame_open_CV, cv::Mat& detected_edges, 
 		}
 	}
 	cv::merge(channels_frame_open_CV, 3, reduction_matrix);
-	channels_frame_open_CV->release();
-	channels_detected_edges->release();
 	return 0;
 }
 
 //image processing
-void process_image(cv::Mat& in_out)
+void process_image(cv::Mat& frame_open_CV)
 {
-	cv::Mat frame_open_CV,
-		detected_edges,
-		reduction_matrix;
-	in_out.copyTo(frame_open_CV);
+	cv::Mat	detected_edges, reduction_matrix;
 	border_image(frame_open_CV, detected_edges);
 	reduction_plus_merge_image(frame_open_CV, detected_edges, reduction_matrix);
-	reduction_matrix.copyTo(in_out);
-	in_out = cv::Mat();
 	frame_open_CV.release();
-	detected_edges.release();
-	reduction_matrix.release();
+	reduction_matrix.copyTo(frame_open_CV);
 }
 
 /* ***************************************************** */
